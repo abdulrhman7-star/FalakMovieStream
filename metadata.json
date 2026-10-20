@@ -1,0 +1,6 @@
+{
+  "name": "MovieStream",
+  "description": "Streaming platform for movies and series with auto Arabic subtitles.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

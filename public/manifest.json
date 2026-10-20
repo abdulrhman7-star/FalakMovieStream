@@ -1,0 +1,16 @@
+{
+  "name": "Falak TV",
+  "short_name": "Falak",
+  "description": "Arabic movie streaming platform",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07080b",
+  "theme_color": "#ff1e27",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml"
+    }
+  ]
+}
