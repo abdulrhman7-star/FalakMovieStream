@@ -19,8 +19,10 @@ import {
   Layers,
   AlertCircle,
   ExternalLink,
+  Share2,
 } from 'lucide-react';
 import { getPlayerUrl, SERVERS } from '@/lib/players';
+import { buildPermalink } from '@/lib/permalink';
 import { LangCode } from '@/types';
 import { T } from '@/lib/i18n';
 
@@ -192,6 +194,33 @@ export default function Player({
     window.open(`https://subdl.com/search/${q}`, '_blank');
   };
 
+  // Regenerate permalink and share
+  const handleShare = async () => {
+    if (!media?.id) return;
+    const permalink = buildPermalink({
+      type: isTv ? 'tv' : 'movie',
+      id: media.id,
+      title,
+      season: isTv ? currentSeason : undefined,
+      episode: isTv ? currentEpisode : undefined,
+    });
+
+    if (navigator.share) {
+      try {
+        await navigator.share({
+          title: `Watch ${title} Online — Falak`,
+          url: permalink,
+        });
+        return;
+      } catch {}
+    }
+
+    try {
+      await navigator.clipboard.writeText(permalink);
+      showToast('تم نسخ رابط المشاركة بنجاح!');
+    } catch {}
+  };
+
   return (
     <div
       ref={containerRef}
@@ -324,6 +353,18 @@ export default function Player({
           >
             <Type className="w-3.5 h-3.5" />
             <span className="hidden sm:inline text-[11px] font-bold">الترجمة</span>
+          </button>
+
+          {/* Share Button */}
+          <button
+            type="button"
+            onClick={handleShare}
+            className="p-2 rounded-lg bg-white/5 hover:bg-white/10 text-gray-300 border border-white/10 transition cursor-pointer flex items-center gap-1"
+            title="مشاركة رابط العرض"
+            aria-label="مشاركة رابط العرض"
+          >
+            <Share2 className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline text-[11px] font-bold">مشاركة</span>
           </button>
 
           {/* Reload Button */}

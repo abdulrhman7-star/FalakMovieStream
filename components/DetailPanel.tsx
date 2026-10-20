@@ -7,6 +7,8 @@ import { fetchTMDB } from '@/lib/tmdb';
 import { T } from '@/lib/i18n';
 import { LangCode } from '@/types';
 
+import { buildPermalink } from '@/lib/permalink';
+
 interface DetailPanelProps {
   media: any;
   lang?: LangCode;
@@ -31,10 +33,9 @@ export default function DetailPanel({
   currentEpisode = 1,
 }: DetailPanelProps) {
   const t = T[lang] || T.ar;
-  const [selectedSeason, setSelectedSeason] = useState(currentSeason);
-  const [selectedEp, setSelectedEp] = useState(currentEpisode);
   const [episodes, setEpisodes] = useState<any[]>([]);
   const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const [copiedToast, setCopiedToast] = useState(false);
 
   // Close on Escape key
   useEffect(() => {
@@ -61,10 +62,11 @@ export default function DetailPanel({
   // Load TV episodes
   useEffect(() => {
     let ignore = false;
-    if (media?.mediaType === 'tv' && media.id) {
+    const isTv = media?.mediaType === 'tv' || media?.media_type === 'tv';
+    if (isTv && media.id) {
       const fetchEpisodes = async () => {
         try {
-          const data = await fetchTMDB(`/tv/${media.id}/season/${selectedSeason}`);
+          const data = await fetchTMDB(`/tv/${media.id}/season/${currentSeason}`);
           if (!ignore) {
             setEpisodes(data.episodes || []);
             setLoadingEpisodes(false);
@@ -81,20 +83,34 @@ export default function DetailPanel({
     return () => {
       ignore = true;
     };
-  }, [media, selectedSeason]);
+  }, [media, currentSeason]);
 
   const handleShare = async () => {
-    const title = media.title || media.name || 'Falak TV';
-    const url = typeof window !== 'undefined' ? window.location.href : 'https://falak.tv';
+    const isTv = media?.mediaType === 'tv' || media?.media_type === 'tv';
+    const type = isTv ? 'tv' : 'movie';
+    const rawTitle = media.title || media.name || 'Falak TV';
+    const permalink = buildPermalink({
+      type,
+      id: media.id,
+      title: rawTitle,
+      season: isTv ? currentSeason : undefined,
+      episode: isTv ? currentEpisode : undefined,
+    });
+
     if (navigator.share) {
       try {
-        await navigator.share({ title, url });
+        await navigator.share({
+          title: `Watch ${rawTitle} Online — Falak`,
+          url: permalink,
+        });
         return;
       } catch {}
     }
+
     try {
-      await navigator.clipboard.writeText(url);
-      alert(t.toast_link_copied || 'تم نسخ الرابط بنجاح!');
+      await navigator.clipboard.writeText(permalink);
+      setCopiedToast(true);
+      setTimeout(() => setCopiedToast(false), 2500);
     } catch {}
   };
 
@@ -115,6 +131,13 @@ export default function DetailPanel({
         className="bg-[#13151f] border border-white/10 p-6 rounded-2xl max-w-4xl w-full my-auto shadow-2xl relative"
         onClick={(e) => e.stopPropagation()}
       >
+        {/* Copied Toast Banner */}
+        {copiedToast && (
+          <div className="absolute top-4 left-1/2 -translate-x-1/2 bg-emerald-500 text-white text-xs font-bold px-4 py-2 rounded-full shadow-xl flex items-center gap-2 z-20">
+            <span>✓ تم نسخ رابط المشاركة بنجاح!</span>
+          </div>
+        )}
+
         {/* Top close button */}
         <button
           type="button"
@@ -195,11 +218,9 @@ export default function DetailPanel({
                   </h4>
                   {seasonsList.length > 0 && (
                     <select
-                      value={selectedSeason}
+                      value={currentSeason}
                       onChange={(e) => {
                         const sNum = Number(e.target.value);
-                        setSelectedSeason(sNum);
-                        setSelectedEp(1);
                         setLoadingEpisodes(true);
                         if (onSelectEpisode) onSelectEpisode(sNum, 1);
                       }}
@@ -221,15 +242,13 @@ export default function DetailPanel({
                     </span>
                   ) : episodes.length > 0 ? (
                     episodes.map((ep: any) => {
-                      const isActive =
-                        selectedEp === ep.episode_number && selectedSeason === currentSeason;
+                      const isActive = currentEpisode === ep.episode_number;
                       return (
                         <button
                           key={ep.id || ep.episode_number}
                           type="button"
                           onClick={() => {
-                            setSelectedEp(ep.episode_number);
-                            if (onSelectEpisode) onSelectEpisode(selectedSeason, ep.episode_number);
+                            if (onSelectEpisode) onSelectEpisode(currentSeason, ep.episode_number);
                           }}
                           className={`p-1.5 text-center rounded-lg text-xs font-bold transition cursor-pointer ${
                             isActive

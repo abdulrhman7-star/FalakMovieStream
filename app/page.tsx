@@ -15,11 +15,17 @@ import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/aut
 import { doc, setDoc, deleteDoc, getDocs, collection } from 'firebase/firestore';
 import { Play, Bookmark, Search as SearchIcon, Film, Trash2, ArrowLeft } from 'lucide-react';
 import { MediaItem } from '@/types';
+import {
+  buildPermalink,
+  parsePermalink,
+  updateMediaMetadata,
+  resetMediaMetadata,
+} from '@/lib/permalink';
 
 const LOCAL_FAVORITES_KEY = 'falak_favorites_guest';
 
 export default function FalakPage() {
-  // Navigation & UI State
+  // Navigation & UI State (pure SSR-safe defaults to prevent hydration mismatch)
   const [activeTab, setActiveTab] = useState<'home' | 'search' | 'favorites'>('home');
   const [activeGenre, setActiveGenre] = useState<string>('');
   const [media, setMedia] = useState<MediaItem[]>([]);
@@ -31,6 +37,22 @@ export default function FalakPage() {
   const [currentSeason, setCurrentSeason] = useState(1);
   const [currentEpisode, setCurrentEpisode] = useState(1);
 
+  // Permalink & Loading Feedback State
+  const [isInitialPermalinkLoading, setIsInitialPermalinkLoading] = useState(false);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const selectedMediaRef = useRef<any>(selectedMedia);
+  useEffect(() => {
+    selectedMediaRef.current = selectedMedia;
+  }, [selectedMedia]);
+
+  const showAppToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 3200);
+  };
+
   // Search State
   const [searchQuery, setSearchQuery] = useState('');
   const [searchResults, setSearchResults] = useState<MediaItem[]>([]);
@@ -38,17 +60,9 @@ export default function FalakPage() {
   const [searchOpen, setSearchOpen] = useState(false);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
 
-  // Auth & Favorites State
+  // Auth & Favorites State (favorites restored from localStorage inside useEffect)
   const [user, setUser] = useState<User | null>(null);
-  const [favorites, setFavorites] = useState<MediaItem[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(LOCAL_FAVORITES_KEY);
-        if (stored) return JSON.parse(stored);
-      } catch {}
-    }
-    return [];
-  });
+  const [favorites, setFavorites] = useState<MediaItem[]>([]);
 
   // Smooth Tab Switching
   const handleTabChange = useCallback((tab: 'home' | 'search' | 'favorites') => {
@@ -219,32 +233,252 @@ export default function FalakPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  // Open detail panel for movie/show
-  const handleOpenDetail = async (id: number, type?: 'movie' | 'tv' | string) => {
-    const resolvedType = type === 'tv' ? 'tv' : 'movie';
+  // 1. Initial mount: safely restore client-side state (localStorage favorites, URL tab, permalink) without SSR hydration mismatches
+  useEffect(() => {
+    // 1a. Restore favorites from local storage
+    try {
+      const stored = localStorage.getItem(LOCAL_FAVORITES_KEY);
+      if (stored) {
+        const parsedFavs = JSON.parse(stored);
+        if (Array.isArray(parsedFavs)) {
+          queueMicrotask(() => {
+            setFavorites(parsedFavs);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Could not read guest favorites:', e);
+    }
+
+    // 1b. Parse search query parameters
+    const search = window.location.search;
+    const params = new URLSearchParams(search);
+    const tabParam = params.get('tab');
+    if (tabParam === 'search' || tabParam === 'favorites') {
+      queueMicrotask(() => {
+        setActiveTab(tabParam);
+      });
+    }
+
+    // 1c. Parse permalink
+    const parsed = parsePermalink(search);
+    if (parsed && parsed.isValid) {
+      queueMicrotask(() => {
+        setIsInitialPermalinkLoading(true);
+      });
+      fetchTMDB(`/${parsed.type}/${parsed.id}?append_to_response=credits,videos,external_ids`)
+        .then((details) => {
+          const fullItem = { ...details, mediaType: parsed.type };
+          setSelectedMedia(fullItem);
+          setCurrentSeason(parsed.season);
+          setCurrentEpisode(parsed.episode);
+          setShowPlayer(false);
+          updateMediaMetadata(fullItem, parsed.season, parsed.episode);
+        })
+        .catch((err) => {
+          console.warn('Permalink item not found:', err);
+          showAppToast('العنصر المطلوب غير موجود');
+          resetMediaMetadata();
+          // Fall back gracefully to clean URL without crashing
+          const pathname = window.location.pathname || '/';
+          const cleanUrl = tabParam && tabParam !== 'home' ? `${pathname}?tab=${tabParam}` : pathname;
+          window.history.replaceState({ tab: tabParam || 'home' }, '', cleanUrl);
+        })
+        .finally(() => {
+          setIsInitialPermalinkLoading(false);
+        });
+    }
+  }, []);
+
+  // 2. Browser history navigation (Back / Forward) popstate listener
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const handlePopState = async () => {
+      const search = window.location.search;
+      const parsed = parsePermalink(search);
+      const params = new URLSearchParams(search);
+      const tabParam = params.get('tab');
+
+      if (tabParam === 'search' || tabParam === 'favorites' || tabParam === 'home') {
+        setActiveTab(tabParam);
+      }
+
+      if (parsed && parsed.isValid) {
+        setCurrentSeason(parsed.season);
+        setCurrentEpisode(parsed.episode);
+
+        const current = selectedMediaRef.current;
+        if (
+          current &&
+          current.id === parsed.id &&
+          (current.mediaType === parsed.type || current.media_type === parsed.type)
+        ) {
+          setShowPlayer(false);
+          updateMediaMetadata(current, parsed.season, parsed.episode);
+        } else {
+          try {
+            const details = await fetchTMDB(
+              `/${parsed.type}/${parsed.id}?append_to_response=credits,videos,external_ids`
+            );
+            const fullItem = { ...details, mediaType: parsed.type };
+            setSelectedMedia(fullItem);
+            setShowPlayer(false);
+            updateMediaMetadata(fullItem, parsed.season, parsed.episode);
+          } catch {
+            setSelectedMedia(null);
+            setShowPlayer(false);
+            resetMediaMetadata();
+          }
+        }
+      } else {
+        // No permalink in URL -> close any open modal/player and restore base view
+        setSelectedMedia(null);
+        setShowPlayer(false);
+        resetMediaMetadata();
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, []);
+
+  // Open detail panel for movie/show with permalink pushState
+  const handleOpenDetail = async (
+    id: number,
+    type?: 'movie' | 'tv' | string,
+    initialTitle?: string,
+    initialSeason = 1,
+    initialEpisode = 1
+  ) => {
+    const resolvedType = String(type).toLowerCase() === 'tv' ? 'tv' : 'movie';
+
+    // Update URL immediately using history.pushState before modal appears
+    const preliminaryUrl = buildPermalink({
+      type: resolvedType,
+      id,
+      title: initialTitle,
+      season: resolvedType === 'tv' ? initialSeason : undefined,
+      episode: resolvedType === 'tv' ? initialEpisode : undefined,
+    });
+    window.history.pushState(
+      { type: resolvedType, id, season: initialSeason, episode: initialEpisode, tab: activeTab },
+      '',
+      preliminaryUrl
+    );
+
     try {
       const details = await fetchTMDB(`/${resolvedType}/${id}?append_to_response=credits,videos,external_ids`);
-      setSelectedMedia({ ...details, mediaType: resolvedType });
-      setCurrentSeason(1);
-      setCurrentEpisode(1);
+      const fullItem = { ...details, mediaType: resolvedType };
+      setSelectedMedia(fullItem);
+      setCurrentSeason(initialSeason);
+      setCurrentEpisode(initialEpisode);
+      setShowPlayer(false);
+
+      const finalUrl = buildPermalink({
+        type: resolvedType,
+        id,
+        title: fullItem.title || fullItem.name || initialTitle,
+        season: resolvedType === 'tv' ? initialSeason : undefined,
+        episode: resolvedType === 'tv' ? initialEpisode : undefined,
+      });
+      window.history.replaceState(
+        { type: resolvedType, id, season: initialSeason, episode: initialEpisode, tab: activeTab },
+        '',
+        finalUrl
+      );
+      updateMediaMetadata(fullItem, initialSeason, initialEpisode);
     } catch {
-      setSelectedMedia({ id, mediaType: resolvedType });
+      const fallbackItem = { id, mediaType: resolvedType, title: initialTitle };
+      setSelectedMedia(fallbackItem);
+      setCurrentSeason(initialSeason);
+      setCurrentEpisode(initialEpisode);
+      setShowPlayer(false);
+      updateMediaMetadata(fallbackItem, initialSeason, initialEpisode);
     }
   };
 
-  // Directly start player for movie/show
+  // Directly start player for movie/show with permalink pushState
   const handleQuickPlay = async (item: any) => {
     const isTv = item.mediaType === 'tv' || item.media_type === 'tv';
     const resolvedType = isTv ? 'tv' : 'movie';
+    const initialTitle = item.title || item.name;
+
+    const permalink = buildPermalink({
+      type: resolvedType,
+      id: item.id,
+      title: initialTitle,
+      season: resolvedType === 'tv' ? 1 : undefined,
+      episode: resolvedType === 'tv' ? 1 : undefined,
+    });
+    window.history.pushState(
+      { type: resolvedType, id: item.id, season: 1, episode: 1, tab: activeTab },
+      '',
+      permalink
+    );
+
     try {
       const details = await fetchTMDB(`/${resolvedType}/${item.id}?append_to_response=credits,videos,external_ids`);
-      setSelectedMedia({ ...details, mediaType: resolvedType });
+      const fullItem = { ...details, mediaType: resolvedType };
+      setSelectedMedia(fullItem);
+      setCurrentSeason(1);
+      setCurrentEpisode(1);
+      setShowPlayer(true);
+      updateMediaMetadata(fullItem, 1, 1);
     } catch {
-      setSelectedMedia({ ...item, mediaType: resolvedType });
+      const fallbackItem = { ...item, mediaType: resolvedType };
+      setSelectedMedia(fallbackItem);
+      setCurrentSeason(1);
+      setCurrentEpisode(1);
+      setShowPlayer(true);
+      updateMediaMetadata(fallbackItem, 1, 1);
     }
-    setCurrentSeason(1);
-    setCurrentEpisode(1);
-    setShowPlayer(true);
+  };
+
+  // Change TV season or episode using replaceState (does not flood history)
+  const handleSelectEpisode = (season: number, episode: number) => {
+    setCurrentSeason(season);
+    setCurrentEpisode(episode);
+    if (selectedMedia) {
+      const isTv = selectedMedia.mediaType === 'tv' || selectedMedia.media_type === 'tv';
+      if (isTv) {
+        const updatedPermalink = buildPermalink({
+          type: 'tv',
+          id: selectedMedia.id,
+          title: selectedMedia.title || selectedMedia.name,
+          season,
+          episode,
+        });
+        window.history.replaceState(
+          { ...window.history.state, season, episode },
+          '',
+          updatedPermalink
+        );
+        updateMediaMetadata(selectedMedia, season, episode);
+      }
+    }
+  };
+
+  // Close detail modal and restore clean URL
+  const handleCloseModal = () => {
+    setSelectedMedia(null);
+    setShowPlayer(false);
+    resetMediaMetadata();
+
+    if (typeof window !== 'undefined') {
+      const pathname = window.location.pathname || '/';
+      const cleanUrl = activeTab && activeTab !== 'home'
+        ? `${pathname}?tab=${activeTab}`
+        : pathname;
+      window.history.pushState({ tab: activeTab }, '', cleanUrl);
+    }
+  };
+
+  // Close player (returns to detail view)
+  const handleClosePlayer = () => {
+    setShowPlayer(false);
   };
 
   return (
@@ -263,13 +497,21 @@ export default function FalakPage() {
         searchResults={searchResults}
         searchLoading={searchLoading}
         onSelectResult={(item) => {
-          handleOpenDetail(item.id, item.media_type || 'movie');
+          handleOpenDetail(item.id, item.media_type || 'movie', item.title || item.name);
           setSearchOpen(false);
           setSearchQuery('');
         }}
         searchOpen={searchOpen}
         setSearchOpen={setSearchOpen}
       />
+
+      {/* Toast Notification Banner */}
+      {toastMessage && (
+        <div className="fixed top-20 left-1/2 -translate-x-1/2 z-50 bg-[#13151f]/95 text-white text-xs sm:text-sm font-bold px-5 py-2.5 rounded-full shadow-2xl border border-red-500/40 backdrop-blur-md flex items-center gap-2 animate-bounce">
+          <span className="w-2 h-2 rounded-full bg-red-500" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
 
       {/* Main Container with top padding to account for fixed navbar, and bottom padding for mobile bar */}
       <main className="flex-1 pt-[72px] pb-[calc(76px+env(safe-area-inset-bottom,0px))] md:pb-0">
@@ -344,7 +586,7 @@ export default function FalakPage() {
               />
 
               {/* Movies Grid */}
-              {loading ? (
+              {loading || isInitialPermalinkLoading ? (
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3.5 sm:gap-4 mt-4">
                   {Array.from({ length: 12 }).map((_, i) => (
                     <div
@@ -367,7 +609,7 @@ export default function FalakPage() {
                       }}
                       isFavorite={favorites.some((f) => f.id === item.id)}
                       onToggleFavorite={toggleFavorite}
-                      onOpenDetail={(i) => handleOpenDetail(i.id, i.mediaType)}
+                      onOpenDetail={(i) => handleOpenDetail(i.id, i.mediaType, i.title)}
                       onQuickPlay={(i) => handleQuickPlay(i)}
                     />
                   ))}
@@ -451,7 +693,7 @@ export default function FalakPage() {
                       }}
                       isFavorite={favorites.some((f) => f.id === item.id)}
                       onToggleFavorite={toggleFavorite}
-                      onOpenDetail={(i) => handleOpenDetail(i.id, i.mediaType)}
+                      onOpenDetail={(i) => handleOpenDetail(i.id, i.mediaType, i.title)}
                       onQuickPlay={(i) => handleQuickPlay(i)}
                     />
                   ))}
@@ -494,9 +736,8 @@ export default function FalakPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    if (confirm('هل أنت متأكد من رغبتك في تفريغ قائمة المحفوظات؟')) {
-                      syncFavoritesStorage([]);
-                    }
+                    syncFavoritesStorage([]);
+                    showAppToast('تم تفريغ قائمة المحفوظات بنجاح');
                   }}
                   className="text-xs text-red-400 hover:text-red-300 transition cursor-pointer flex items-center gap-1"
                 >
@@ -517,7 +758,7 @@ export default function FalakPage() {
                     }}
                     isFavorite={true}
                     onToggleFavorite={toggleFavorite}
-                    onOpenDetail={(i) => handleOpenDetail(i.id, i.mediaType)}
+                    onOpenDetail={(i) => handleOpenDetail(i.id, i.mediaType, i.title)}
                     onQuickPlay={(i) => handleQuickPlay(i)}
                   />
                 ))}
@@ -568,14 +809,11 @@ export default function FalakPage() {
           lang="ar"
           isFavorite={favorites.some((f) => f.id === selectedMedia.id)}
           onToggleFavorite={toggleFavorite}
-          onClose={() => setSelectedMedia(null)}
+          onClose={handleCloseModal}
           onWatch={() => setShowPlayer(true)}
           currentSeason={currentSeason}
           currentEpisode={currentEpisode}
-          onSelectEpisode={(season, episode) => {
-            setCurrentSeason(season);
-            setCurrentEpisode(episode);
-          }}
+          onSelectEpisode={handleSelectEpisode}
         />
       )}
 
@@ -585,11 +823,8 @@ export default function FalakPage() {
           media={selectedMedia}
           currentSeason={currentSeason}
           currentEpisode={currentEpisode}
-          onClose={() => setShowPlayer(false)}
-          onSelectEpisode={(season, episode) => {
-            setCurrentSeason(season);
-            setCurrentEpisode(episode);
-          }}
+          onClose={handleClosePlayer}
+          onSelectEpisode={handleSelectEpisode}
           lang="ar"
         />
       )}
