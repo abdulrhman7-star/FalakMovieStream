@@ -14,7 +14,8 @@ import { auth, googleProvider, db } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, setDoc, deleteDoc, getDocs, collection } from 'firebase/firestore';
 import { Play, Bookmark, Search as SearchIcon, Film, Trash2, ArrowLeft } from 'lucide-react';
-import { MediaItem } from '@/types';
+import { MediaItem, LangCode } from '@/types';
+import { T, LANGUAGES } from '@/lib/i18n';
 import {
   buildPermalink,
   parsePermalink,
@@ -25,9 +26,15 @@ import {
 const LOCAL_FAVORITES_KEY = 'falak_favorites_guest';
 
 export default function FalakPage() {
+  // Language & Localization State (SSR-safe default 'ar')
+  const [lang, setLang] = useState<LangCode>('ar');
+  const t = T[lang] || T.ar;
+  const tmdbLang = LANGUAGES.find((l) => l.code === lang)?.tmdb || 'ar-SA';
+
   // Navigation & UI State (pure SSR-safe defaults to prevent hydration mismatch)
   const [activeTab, setActiveTab] = useState<'home' | 'search' | 'favorites'>('home');
-  const [activeGenre, setActiveGenre] = useState<string>('');
+  const [selectedGenres, setSelectedGenres] = useState<string[]>([]);
+  const [genreLogic, setGenreLogic] = useState<'or' | 'and'>('or');
   const [media, setMedia] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -168,17 +175,46 @@ export default function FalakPage() {
     }
   };
 
-  // Fetch movies when genre changes or on initial mount
+  // Handle display language change with local persistence and direction update
+  const handleLanguageChange = (newLang: LangCode) => {
+    setLang(newLang);
+    try {
+      localStorage.setItem('falak_lang', newLang);
+    } catch {}
+    if (typeof document !== 'undefined') {
+      document.documentElement.lang = newLang;
+      const found = LANGUAGES.find((l) => l.code === newLang);
+      document.documentElement.dir = found?.dir || (newLang === 'ar' ? 'rtl' : 'ltr');
+    }
+    const tNew = T[newLang] || T.ar;
+    showAppToast(tNew.toast_lang_changed || '🌐 Language changed');
+  };
+
+  // Multi-genre filter handlers
+  const handleToggleGenre = (genreId: string) => {
+    setSelectedGenres((prev) =>
+      prev.includes(genreId) ? prev.filter((id) => id !== genreId) : [...prev, genreId]
+    );
+  };
+
+  const handleClearGenres = () => {
+    setSelectedGenres([]);
+  };
+
+  // Fetch movies when selected genres, logic mode, or language changes or on initial mount
   useEffect(() => {
     let isCancelled = false;
 
     async function loadMovies() {
       setLoading(true);
       try {
-        const endpoint = activeGenre
-          ? `/discover/movie?with_genres=${activeGenre}&sort_by=popularity.desc`
-          : `/movie/popular`;
-        const data = await fetchTMDB(endpoint);
+        let endpoint = '/movie/popular';
+        if (selectedGenres.length > 0) {
+          const separator = genreLogic === 'and' ? ',' : '|';
+          const genreParam = selectedGenres.join(separator);
+          endpoint = `/discover/movie?with_genres=${genreParam}&sort_by=popularity.desc`;
+        }
+        const data = await fetchTMDB(endpoint, { lang: tmdbLang });
         if (!isCancelled) {
           setMedia(data.results || []);
         }
@@ -198,7 +234,7 @@ export default function FalakPage() {
     return () => {
       isCancelled = true;
     };
-  }, [activeGenre]);
+  }, [selectedGenres, genreLogic, tmdbLang]);
 
   const handleSearchChange = (q: string) => {
     setSearchQuery(q);
@@ -208,7 +244,7 @@ export default function FalakPage() {
     }
   };
 
-  // Live search debounce handler
+  // Live search debounce handler with localized TMDB results
   useEffect(() => {
     if (searchQuery.trim().length < 2) {
       return;
@@ -218,7 +254,10 @@ export default function FalakPage() {
       setSearchLoading(true);
       setSearchOpen(true);
       try {
-        const data = await fetchTMDB(`/search/multi?query=${encodeURIComponent(searchQuery.trim())}`);
+        const data = await fetchTMDB(
+          `/search/multi?query=${encodeURIComponent(searchQuery.trim())}`,
+          { lang: tmdbLang }
+        );
         const filtered = (data.results || []).filter(
           (item: any) => (item.media_type === 'movie' || item.media_type === 'tv') && item.poster_path
         );
@@ -231,11 +270,26 @@ export default function FalakPage() {
     }, 200);
 
     return () => clearTimeout(timer);
-  }, [searchQuery]);
+  }, [searchQuery, tmdbLang]);
 
-  // 1. Initial mount: safely restore client-side state (localStorage favorites, URL tab, permalink) without SSR hydration mismatches
+  // 1. Initial mount: safely restore client-side state (language, localStorage favorites, URL tab, permalink) without SSR hydration mismatches
   useEffect(() => {
-    // 1a. Restore favorites from local storage
+    // 1a. Restore language preference from local storage
+    try {
+      const storedLang = localStorage.getItem('falak_lang') as LangCode;
+      if (storedLang && ['ar', 'en', 'fr', 'es', 'tr'].includes(storedLang)) {
+        queueMicrotask(() => {
+          setLang(storedLang);
+          document.documentElement.lang = storedLang;
+          const found = LANGUAGES.find((l) => l.code === storedLang);
+          document.documentElement.dir = found?.dir || (storedLang === 'ar' ? 'rtl' : 'ltr');
+        });
+      }
+    } catch (e) {
+      console.warn('Could not read stored language:', e);
+    }
+
+    // 1b. Restore favorites from local storage
     try {
       const stored = localStorage.getItem(LOCAL_FAVORITES_KEY);
       if (stored) {
@@ -485,7 +539,8 @@ export default function FalakPage() {
     <div className="bg-[#07080b] text-white min-h-screen flex flex-col antialiased">
       {/* Top Navbar */}
       <Header
-        lang="ar"
+        lang={lang}
+        onLangChange={handleLanguageChange}
         activeTab={activeTab}
         onTabChange={handleTabChange}
         favoritesCount={favorites.length}
@@ -532,16 +587,16 @@ export default function FalakPage() {
 
               <div className="container mx-auto px-4 relative z-10 py-10 max-w-4xl">
                 <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold bg-red-600/15 border border-red-500/30 text-red-400 mb-4">
-                  ✨ تجربة سينمائية مجانية بجودة 4K & HD
+                  {t.hero_badge}
                 </span>
                 <h1 className="text-3xl sm:text-5xl md:text-6xl font-black leading-tight tracking-tight text-white mb-4">
-                  شاهد عالمك السينمائي <br />
+                  {t.hero_title_1} <br />
                   <span className="bg-gradient-to-r from-red-500 to-red-700 bg-clip-text text-transparent">
-                    على منصة فلك
+                    {t.hero_title_2}
                   </span>
                 </h1>
                 <p className="text-xs sm:text-sm text-gray-300 max-w-xl leading-relaxed mb-6">
-                  منصتك الأولى لمتابعة أحدث الأفلام والمسلسلات الحصرية مع مشغل YapGrid الذكي ودعم الترجمة العربية التلقائية بدون اشتراك.
+                  {t.hero_desc}
                 </p>
                 <div className="flex flex-wrap items-center gap-3">
                   <button
@@ -552,7 +607,7 @@ export default function FalakPage() {
                     className="flex items-center gap-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white font-extrabold text-xs sm:text-sm px-6 py-3 rounded-full shadow-lg shadow-red-600/30 transition cursor-pointer active:scale-95"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    <span>تصفح العروض</span>
+                    <span>{t.btn_browse}</span>
                   </button>
                   <button
                     type="button"
@@ -560,7 +615,7 @@ export default function FalakPage() {
                     className="flex items-center gap-2 bg-white/5 hover:bg-white/10 border border-white/10 text-white font-bold text-xs sm:text-sm px-5 py-3 rounded-full transition cursor-pointer"
                   >
                     <Bookmark className="w-4 h-4" />
-                    <span>قائمة محفوظاتي ({favorites.length})</span>
+                    <span>{t.my_favorites} ({favorites.length})</span>
                   </button>
                 </div>
               </div>
@@ -571,18 +626,18 @@ export default function FalakPage() {
               <div className="flex items-center justify-between mb-2">
                 <h2 className="text-lg sm:text-xl font-extrabold text-white flex items-center gap-2">
                   <span className="w-2.5 h-5 rounded-full bg-red-600 inline-block" />
-                  <span>تصفح الأفلام والعروض</span>
+                  <span>{t.browse_title}</span>
                 </h2>
               </div>
 
               {/* Horizontal Scrollable Genre Chips Bar */}
               <GenreChips
-                lang="ar"
-                activeGenre={activeGenre}
-                onSelectGenre={(genreId) => {
-                  if (genreId === activeGenre) return;
-                  setActiveGenre(genreId);
-                }}
+                lang={lang}
+                selectedGenres={selectedGenres}
+                onToggleGenre={handleToggleGenre}
+                onClearGenres={handleClearGenres}
+                genreLogic={genreLogic}
+                onChangeLogic={setGenreLogic}
               />
 
               {/* Movies Grid */}
@@ -615,17 +670,34 @@ export default function FalakPage() {
                   ))}
                 </div>
               ) : (
-                <div className="text-center py-16 px-4 bg-[#13151f] rounded-2xl border border-white/5 my-6">
+                <div className="text-center py-16 px-4 bg-[#13151f] rounded-2xl border border-white/5 my-6 max-w-xl mx-auto">
                   <Film className="w-12 h-12 text-gray-500 mx-auto mb-3" />
-                  <h3 className="font-bold text-base text-gray-200 mb-1">لا توجد أعمال متاحة لهذا التصنيف</h3>
-                  <p className="text-xs text-gray-400 mb-4">جرّب اختيار تصنيف سينمائي آخر أو تصفح الكل.</p>
-                  <button
-                    type="button"
-                    onClick={() => setActiveGenre('')}
-                    className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-4 py-2 rounded-full transition cursor-pointer"
-                  >
-                    عرض جميع الأفلام
-                  </button>
+                  <h3 className="font-bold text-base text-gray-200 mb-1">
+                    {selectedGenres.length > 0 ? t.genre_no_results_title : 'لا توجد أعمال متاحة حالياً'}
+                  </h3>
+                  <p className="text-xs text-gray-400 mb-4">
+                    {selectedGenres.length > 0 ? t.genre_no_results_desc : 'جرّب التصفح لاحقاً أو اختيار تصنيفات أخرى.'}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-2">
+                    {selectedGenres.length > 1 && genreLogic === 'and' && (
+                      <button
+                        type="button"
+                        onClick={() => setGenreLogic('or')}
+                        className="bg-red-600 hover:bg-red-500 text-white text-xs font-bold px-4 py-2 rounded-full transition cursor-pointer shadow-md shadow-red-600/30"
+                      >
+                        {t.genre_switch_to_any}
+                      </button>
+                    )}
+                    {selectedGenres.length > 0 && (
+                      <button
+                        type="button"
+                        onClick={handleClearGenres}
+                        className="bg-white/10 hover:bg-white/20 text-white text-xs font-bold px-4 py-2 rounded-full transition cursor-pointer"
+                      >
+                        {t.genre_show_all}
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
             </section>
@@ -639,24 +711,24 @@ export default function FalakPage() {
               <button
                 type="button"
                 onClick={() => handleTabChange('home')}
-                aria-label="الرجوع إلى الرئيسية"
+                aria-label={t.nav_home}
                 className="p-2 text-gray-400 hover:text-white rounded-full bg-white/5 transition cursor-pointer"
               >
                 <ArrowLeft className="w-5 h-5" />
               </button>
-              <h2 className="text-xl font-black text-white">البحث الفوري الشامل</h2>
+              <h2 className="text-xl font-black text-white">{t.btn_search}</h2>
             </div>
 
             {/* Mobile / Full search input with auto-focus */}
             <div className="relative mb-6">
-              <SearchIcon className="w-5 h-5 text-gray-400 absolute right-4 top-1/2 -translate-y-1/2 pointer-events-none" />
+              <SearchIcon className="w-5 h-5 text-gray-400 absolute end-4 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
                 ref={searchInputRef}
                 type="text"
                 value={searchQuery}
                 onChange={(e) => handleSearchChange(e.target.value)}
-                placeholder="ابحث بالاسم عن فيلم أو مسلسل..."
-                className="w-full bg-[#13151f] border border-white/15 rounded-2xl pr-12 pl-4 py-3.5 text-sm text-white placeholder-gray-400 focus:outline-none focus:border-red-500 shadow-xl transition"
+                placeholder={t.search_placeholder}
+                className="w-full bg-[#13151f] border border-white/15 rounded-2xl pe-12 ps-4 py-3.5 text-sm text-white placeholder-gray-400 focus:outline-none focus:border-red-500 shadow-xl transition"
               />
               {searchQuery && (
                 <button
@@ -665,9 +737,9 @@ export default function FalakPage() {
                     setSearchQuery('');
                     setSearchResults([]);
                   }}
-                  className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white text-xs px-2 py-1 rounded bg-white/5"
+                  className="absolute start-4 top-1/2 -translate-y-1/2 text-gray-400 hover:text-white text-xs px-2 py-1 rounded bg-white/5"
                 >
-                  مسح
+                  {t.search_clear}
                 </button>
               )}
             </div>
@@ -676,12 +748,12 @@ export default function FalakPage() {
             {searchLoading ? (
               <div className="flex items-center justify-center gap-3 py-16 text-gray-400">
                 <div className="w-5 h-5 border-2 border-red-500 border-t-transparent rounded-full animate-spin" />
-                <span className="text-sm">جاري البحث في قاعدة بيانات الأفلام...</span>
+                <span className="text-sm">{t.search_searching}</span>
               </div>
             ) : searchResults.length > 0 ? (
               <div>
                 <p className="text-xs text-gray-400 mb-4 font-semibold">
-                  تم العثور على {searchResults.length} نتيجة:
+                  {searchResults.length} {t.search_instant}:
                 </p>
                 <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-4">
                   {searchResults.map((item) => (
@@ -702,13 +774,13 @@ export default function FalakPage() {
             ) : searchQuery.trim().length >= 2 ? (
               <div className="text-center py-16 text-gray-400">
                 <SearchIcon className="w-12 h-12 mx-auto mb-2 opacity-30" />
-                <p className="text-sm font-bold">لا توجد نتائج مطابقة لـ &quot;{searchQuery}&quot;</p>
-                <p className="text-xs text-gray-500 mt-1">تأكد من كتابة الاسم بشكل صحيح أو جرّب كلمات أخرى.</p>
+                <p className="text-sm font-bold">{t.no_results}</p>
+                <p className="text-xs text-gray-500 mt-1">{t.search_hint}</p>
               </div>
             ) : (
               <div className="text-center py-16 text-gray-500">
                 <SearchIcon className="w-12 h-12 mx-auto mb-2 opacity-20" />
-                <p className="text-sm">اكتب حرفين أو أكثر لبدء البحث الفوري عن أي فيلم أو مسلسل.</p>
+                <p className="text-sm">{t.search_type_more}</p>
               </div>
             )}
           </section>
@@ -722,14 +794,14 @@ export default function FalakPage() {
                 <button
                   type="button"
                   onClick={() => handleTabChange('home')}
-                  aria-label="الرجوع إلى الرئيسية"
+                  aria-label={t.nav_home}
                   className="p-2 text-gray-400 hover:text-white rounded-full bg-white/5 transition cursor-pointer"
                 >
                   <ArrowLeft className="w-5 h-5" />
                 </button>
                 <h2 className="text-xl sm:text-2xl font-black text-white flex items-center gap-2">
                   <Bookmark className="w-6 h-6 text-red-500 fill-current" />
-                  <span>قائمة محفوظاتي ({favorites.length})</span>
+                  <span>{t.favorites_title} ({favorites.length})</span>
                 </h2>
               </div>
               {favorites.length > 0 && (
@@ -737,12 +809,12 @@ export default function FalakPage() {
                   type="button"
                   onClick={() => {
                     syncFavoritesStorage([]);
-                    showAppToast('تم تفريغ قائمة المحفوظات بنجاح');
+                    showAppToast(t.toast_fav_removed);
                   }}
                   className="text-xs text-red-400 hover:text-red-300 transition cursor-pointer flex items-center gap-1"
                 >
                   <Trash2 className="w-3.5 h-3.5" />
-                  <span>تفريغ الكل</span>
+                  <span>{t.fav_remove}</span>
                 </button>
               )}
             </div>
@@ -766,16 +838,16 @@ export default function FalakPage() {
             ) : (
               <div className="text-center py-20 px-4 bg-[#13151f] rounded-2xl border border-white/5 my-6">
                 <Bookmark className="w-14 h-14 text-gray-600 mx-auto mb-3" />
-                <h3 className="font-bold text-base text-gray-200 mb-1">لا توجد عناصر محفوظة حتى الآن</h3>
+                <h3 className="font-bold text-base text-gray-200 mb-1">{t.favorites_empty}</h3>
                 <p className="text-xs text-gray-400 max-w-sm mx-auto mb-5 leading-relaxed">
-                  أثناء تصفحك للأفلام والمسلسلات، اضغط على أيقونة الإشارة المرجعية لحفظ أعمالك المفضلة والوصول إليها بسرعة في أي وقت.
+                  {t.fav_guest_note}
                 </p>
                 <button
                   type="button"
                   onClick={() => handleTabChange('home')}
                   className="bg-red-600 hover:bg-red-700 text-white text-xs font-bold px-6 py-2.5 rounded-full shadow-lg shadow-red-600/30 transition cursor-pointer"
                 >
-                  استكشف أحدث الأفلام
+                  {t.btn_browse}
                 </button>
               </div>
             )}
@@ -785,17 +857,22 @@ export default function FalakPage() {
 
       {/* Footer with Working Links */}
       <Footer
-        lang="ar"
+        lang={lang}
         onTabChange={handleTabChange}
         onSelectGenre={(genreId) => {
-          setActiveGenre(genreId);
+          setSelectedGenres([genreId]);
           handleTabChange('home');
+          if (typeof window !== 'undefined') {
+            setTimeout(() => {
+              document.getElementById('movies-catalog')?.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
+          }
         }}
       />
 
       {/* Mobile Bottom Navigation Bar (Hidden when video player is active) */}
       <MobileNav
-        lang="ar"
+        lang={lang}
         activeTab={activeTab}
         onTabChange={handleTabChange}
         favoritesCount={favorites.length}
@@ -806,7 +883,7 @@ export default function FalakPage() {
       {selectedMedia && !showPlayer && (
         <DetailPanel
           media={selectedMedia}
-          lang="ar"
+          lang={lang}
           isFavorite={favorites.some((f) => f.id === selectedMedia.id)}
           onToggleFavorite={toggleFavorite}
           onClose={handleCloseModal}
@@ -825,7 +902,7 @@ export default function FalakPage() {
           currentEpisode={currentEpisode}
           onClose={handleClosePlayer}
           onSelectEpisode={handleSelectEpisode}
-          lang="ar"
+          lang={lang}
         />
       )}
     </div>
