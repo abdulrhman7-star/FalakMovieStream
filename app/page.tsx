@@ -13,8 +13,8 @@ import { fetchTMDB } from '@/lib/tmdb';
 import { auth, googleProvider, db } from '@/lib/firebase';
 import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
 import { doc, setDoc, deleteDoc, getDocs, collection } from 'firebase/firestore';
-import { Play, Bookmark, Search as SearchIcon, Film, Trash2, ArrowLeft } from 'lucide-react';
-import { MediaItem, LangCode } from '@/types';
+import { Play, Bookmark, Search as SearchIcon, Film, Trash2, ArrowLeft, X, Tv } from 'lucide-react';
+import { MediaItem, LangCode, ContinueWatchingItem } from '@/types';
 import { T, LANGUAGES } from '@/lib/i18n';
 import {
   buildPermalink,
@@ -24,6 +24,7 @@ import {
 } from '@/lib/permalink';
 
 const LOCAL_FAVORITES_KEY = 'falak_favorites_guest';
+const LOCAL_CONTINUE_WATCHING_KEY = 'falak_continue_watching';
 
 export default function FalakPage() {
   // Language & Localization State (SSR-safe default 'ar')
@@ -37,6 +38,8 @@ export default function FalakPage() {
   const [genreLogic, setGenreLogic] = useState<'or' | 'and'>('or');
   const [media, setMedia] = useState<MediaItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [continueWatching, setContinueWatching] = useState<ContinueWatchingItem[]>([]);
+
 
   // Player & Detail Modal State
   const [selectedMedia, setSelectedMedia] = useState<any>(null);
@@ -153,6 +156,34 @@ export default function FalakPage() {
       }
     }
     syncFavoritesStorage(updatedList);
+  };
+
+  // Continue Watching Logic
+  const updateContinueWatching = useCallback((item: any, season?: number, episode?: number) => {
+    setContinueWatching((prev) => {
+      const newItem: ContinueWatchingItem = {
+        id: item.id,
+        mediaType: (item.mediaType || item.media_type || 'movie') as any,
+        title: item.title || item.name || '',
+        poster_path: item.poster_path || '',
+        season,
+        episode,
+        lastUpdated: Date.now(),
+      };
+
+      const filtered = prev.filter((i) => i.id !== item.id);
+      const updated = [newItem, ...filtered].slice(0, 12); // Keep last 12 items
+      localStorage.setItem(LOCAL_CONTINUE_WATCHING_KEY, JSON.stringify(updated));
+      return updated;
+    });
+  }, []);
+
+  const removeFromHistory = (id: number) => {
+    setContinueWatching((prev) => {
+      const updated = prev.filter((i) => i.id !== id);
+      localStorage.setItem(LOCAL_CONTINUE_WATCHING_KEY, JSON.stringify(updated));
+      return updated;
+    });
   };
 
   // Google Sign-in Handler
@@ -314,6 +345,21 @@ export default function FalakPage() {
       });
     }
 
+    // 1d. Restore continue watching from local storage
+    try {
+      const stored = localStorage.getItem(LOCAL_CONTINUE_WATCHING_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed)) {
+          queueMicrotask(() => {
+            setContinueWatching(parsed);
+          });
+        }
+      }
+    } catch (e) {
+      console.warn('Could not read continue watching history:', e);
+    }
+
     // 1c. Parse permalink
     const parsed = parsePermalink(search);
     if (parsed && parsed.isValid) {
@@ -409,16 +455,27 @@ export default function FalakPage() {
   ) => {
     const resolvedType = String(type).toLowerCase() === 'tv' ? 'tv' : 'movie';
 
+    // Check if we should resume from saved progress
+    let startS = initialSeason;
+    let startE = initialEpisode;
+    if (initialSeason === 1 && initialEpisode === 1) {
+      const saved = continueWatching.find((i) => i.id === id);
+      if (saved) {
+        startS = saved.season || 1;
+        startE = saved.episode || 1;
+      }
+    }
+
     // Update URL immediately using history.pushState before modal appears
     const preliminaryUrl = buildPermalink({
       type: resolvedType,
       id,
       title: initialTitle,
-      season: resolvedType === 'tv' ? initialSeason : undefined,
-      episode: resolvedType === 'tv' ? initialEpisode : undefined,
+      season: resolvedType === 'tv' ? startS : undefined,
+      episode: resolvedType === 'tv' ? startE : undefined,
     });
     window.history.pushState(
-      { type: resolvedType, id, season: initialSeason, episode: initialEpisode, tab: activeTab },
+      { type: resolvedType, id, season: startS, episode: startE, tab: activeTab },
       '',
       preliminaryUrl
     );
@@ -427,30 +484,30 @@ export default function FalakPage() {
       const details = await fetchTMDB(`/${resolvedType}/${id}?append_to_response=credits,videos,external_ids`);
       const fullItem = { ...details, mediaType: resolvedType };
       setSelectedMedia(fullItem);
-      setCurrentSeason(initialSeason);
-      setCurrentEpisode(initialEpisode);
+      setCurrentSeason(startS);
+      setCurrentEpisode(startE);
       setShowPlayer(false);
 
       const finalUrl = buildPermalink({
         type: resolvedType,
         id,
         title: fullItem.title || fullItem.name || initialTitle,
-        season: resolvedType === 'tv' ? initialSeason : undefined,
-        episode: resolvedType === 'tv' ? initialEpisode : undefined,
+        season: resolvedType === 'tv' ? startS : undefined,
+        episode: resolvedType === 'tv' ? startE : undefined,
       });
       window.history.replaceState(
-        { type: resolvedType, id, season: initialSeason, episode: initialEpisode, tab: activeTab },
+        { type: resolvedType, id, season: startS, episode: startE, tab: activeTab },
         '',
         finalUrl
       );
-      updateMediaMetadata(fullItem, initialSeason, initialEpisode);
+      updateMediaMetadata(fullItem, startS, startE);
     } catch {
       const fallbackItem = { id, mediaType: resolvedType, title: initialTitle };
       setSelectedMedia(fallbackItem);
-      setCurrentSeason(initialSeason);
-      setCurrentEpisode(initialEpisode);
+      setCurrentSeason(startS);
+      setCurrentEpisode(startE);
       setShowPlayer(false);
-      updateMediaMetadata(fallbackItem, initialSeason, initialEpisode);
+      updateMediaMetadata(fallbackItem, startS, startE);
     }
   };
 
@@ -477,17 +534,30 @@ export default function FalakPage() {
       const details = await fetchTMDB(`/${resolvedType}/${item.id}?append_to_response=credits,videos,external_ids`);
       const fullItem = { ...details, mediaType: resolvedType };
       setSelectedMedia(fullItem);
-      setCurrentSeason(1);
-      setCurrentEpisode(1);
+      
+      // Check if item exists in continueWatching to resume from last episode
+      const saved = continueWatching.find((i) => i.id === item.id);
+      const startS = saved?.season || 1;
+      const startE = saved?.episode || 1;
+      
+      setCurrentSeason(startS);
+      setCurrentEpisode(startE);
       setShowPlayer(true);
-      updateMediaMetadata(fullItem, 1, 1);
+      updateMediaMetadata(fullItem, startS, startE);
+      updateContinueWatching(fullItem, startS, startE);
     } catch {
       const fallbackItem = { ...item, mediaType: resolvedType };
       setSelectedMedia(fallbackItem);
-      setCurrentSeason(1);
-      setCurrentEpisode(1);
+      
+      const saved = continueWatching.find((i) => i.id === item.id);
+      const startS = saved?.season || 1;
+      const startE = saved?.episode || 1;
+
+      setCurrentSeason(startS);
+      setCurrentEpisode(startE);
       setShowPlayer(true);
-      updateMediaMetadata(fallbackItem, 1, 1);
+      updateMediaMetadata(fallbackItem, startS, startE);
+      updateContinueWatching(fallbackItem, startS, startE);
     }
   };
 
@@ -511,6 +581,9 @@ export default function FalakPage() {
           updatedPermalink
         );
         updateMediaMetadata(selectedMedia, season, episode);
+        if (showPlayer) {
+          updateContinueWatching(selectedMedia, season, episode);
+        }
       }
     }
   };
@@ -602,12 +675,18 @@ export default function FalakPage() {
                   <button
                     type="button"
                     onClick={() => {
-                      document.getElementById('movies-catalog')?.scrollIntoView({ behavior: 'smooth' });
+                      if (continueWatching.length > 0) {
+                        const last = continueWatching[0];
+                        handleOpenDetail(last.id, last.mediaType, last.title, last.season, last.episode);
+                        setTimeout(() => setShowPlayer(true), 800);
+                      } else {
+                        document.getElementById('movies-catalog')?.scrollIntoView({ behavior: 'smooth' });
+                      }
                     }}
                     className="flex items-center gap-2 bg-gradient-to-r from-red-600 to-red-700 hover:from-red-500 hover:to-red-600 text-white font-extrabold text-xs sm:text-sm px-6 py-3 rounded-full shadow-lg shadow-red-600/30 transition cursor-pointer active:scale-95"
                   >
                     <Play className="w-4 h-4 fill-current" />
-                    <span>{t.btn_browse}</span>
+                    <span>{continueWatching.length > 0 ? t.continue_watching : t.btn_browse}</span>
                   </button>
                   <button
                     type="button"
@@ -620,6 +699,68 @@ export default function FalakPage() {
                 </div>
               </div>
             </section>
+
+            {/* Continue Watching Section */}
+            {continueWatching.length > 0 && (
+              <section className="container mx-auto px-4 py-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg sm:text-xl font-extrabold text-white flex items-center gap-2">
+                    <span className="w-2.5 h-5 rounded-full bg-amber-500 inline-block" />
+                    <span>{t.continue_watching}</span>
+                  </h2>
+                </div>
+                <div className="flex items-center gap-4 overflow-x-auto pb-4 no-scrollbar scrollbar-hide">
+                  {continueWatching.map((item) => (
+                    <div
+                      key={item.id}
+                      className="shrink-0 w-[200px] sm:w-[240px] group relative rounded-2xl overflow-hidden bg-[#13151f] border border-white/5 hover:border-amber-500/50 transition-all shadow-xl"
+                    >
+                      <div className="aspect-video relative overflow-hidden">
+                        <img
+                          src={`https://image.tmdb.org/t/p/w500${item.poster_path}`}
+                          alt={item.title}
+                          className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
+                        />
+                        <div className="absolute inset-0 bg-gradient-to-t from-black/90 via-black/20 to-transparent" />
+                        <button
+                          onClick={() => handleOpenDetail(item.id, item.mediaType, item.title, item.season, item.episode)}
+                          className="absolute inset-0 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity bg-black/40"
+                        >
+                          <div className="w-10 h-10 rounded-full bg-amber-500 flex items-center justify-center text-white shadow-lg">
+                            <Play className="w-5 h-5 fill-current ml-0.5" />
+                          </div>
+                        </button>
+                        <button
+                          onClick={() => removeFromHistory(item.id)}
+                          className="absolute top-2 right-2 p-1.5 rounded-full bg-black/60 text-white/70 hover:text-red-500 hover:bg-black transition-all"
+                          title={t.remove_from_history}
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="p-3">
+                        <h3 className="font-extrabold text-xs text-white truncate mb-1" title={item.title}>
+                          {item.title}
+                        </h3>
+                        <p className="text-[10px] text-amber-400 font-bold flex items-center gap-1">
+                          {item.mediaType === 'tv' ? (
+                            <>
+                              <Tv className="w-3 h-3" />
+                              <span>{t.resume_episode.replace('{s}', String(item.season)).replace('{e}', String(item.episode))}</span>
+                            </>
+                          ) : (
+                            <>
+                              <Film className="w-3 h-3" />
+                              <span>{t.resume_movie}</span>
+                            </>
+                          )}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
 
             {/* Movies Catalog Section */}
             <section id="movies-catalog" className="container mx-auto px-4 py-8">
@@ -887,7 +1028,10 @@ export default function FalakPage() {
           isFavorite={favorites.some((f) => f.id === selectedMedia.id)}
           onToggleFavorite={toggleFavorite}
           onClose={handleCloseModal}
-          onWatch={() => setShowPlayer(true)}
+          onWatch={() => {
+            setShowPlayer(true);
+            updateContinueWatching(selectedMedia, currentSeason, currentEpisode);
+          }}
           currentSeason={currentSeason}
           currentEpisode={currentEpisode}
           onSelectEpisode={handleSelectEpisode}

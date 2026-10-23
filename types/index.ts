@@ -40,3 +40,15 @@ export interface Episode {
   episode_number: number;
   id: number;
 }
+
+export interface ContinueWatchingItem {
+  id: number;
+  mediaType: MediaType;
+  title: string;
+  poster_path: string;
+  season?: number;
+  episode?: number;
+  timestamp?: number;
+  lastUpdated: number;
+}
+
