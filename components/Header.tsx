@@ -6,6 +6,7 @@ import { Film, LogIn, LogOut, Search as SearchIcon, Globe, ChevronDown, Check } 
 import { T, LANGUAGES } from '@/lib/i18n';
 import { LangCode } from '@/types';
 import SearchDropdown from './SearchDropdown';
+import { PWAInstallButton } from './PWAInstallButton';
 
 interface HeaderProps {
   lang: LangCode;
@@ -161,6 +162,9 @@ export default function Header({
 
         {/* Right Section: Language Switcher & Authentication */}
         <div className="flex items-center gap-2 sm:gap-2.5 justify-end">
+          <div className="hidden md:flex">
+            <PWAInstallButton />
+          </div>
           {/* Language Switcher Dropdown */}
           <div className="relative" ref={langRef}>
             <button
